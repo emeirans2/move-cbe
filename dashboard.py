@@ -26,6 +26,18 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🎨 Creatives", "🌤 Scor
 
 # TAB 1: Dashboard
 with tab1:
+    col_run, col_status = st.columns([2, 3])
+with col_run:
+    if st.button("🔄 Run Daily Loop", type="primary"):
+        with st.spinner("Fetching news, weather, scoring mood, matching creatives..."):
+            resp = httpx.post(f"{BASE}/mood/auto", timeout=60)
+        if resp.status_code == 200:
+            data = resp.json()
+            st.success(f"✅ Loop complete! Mood scored, {data['recommendations_generated']} recommendations generated.")
+            st.caption(f"Sources: {', '.join(data['sources']['news'])} · Demand index: {data['demand_index']}")
+            st.rerun()
+        else:
+            st.error(f"Error: {resp.text}")
     st.subheader("Today's Recommendations")
     recs_resp = httpx.get(f"{BASE}/recommendations?status=pending")
     recs = [r for r in recs_resp.json() if r["client_id"] == selected_id]

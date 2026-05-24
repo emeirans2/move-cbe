@@ -75,3 +75,92 @@ def compute_demand_index(
            + sports_event 
            + firstparty_lift)
     return round(max(0.5, min(1.5, raw)), 3)
+
+
+def allocate_budget_pool(
+    matches: list,
+    total_budget_eur: float,
+    demand_index: float,
+    threshold: float = 0.75,
+    min_budget_eur: float = 5.0,
+    min_change_pct: float = 0.10
+) -> list:
+    """
+    Distribute a FIXED budget pool across campaigns by match strength.
+
+    - Only creatives matching >= threshold get a meaningful share; below-threshold
+      creatives get the minimum floor (kept alive but starved).
+    - Weight = (match strength above threshold) — stronger match = bigger slice.
+    - demand_index scales how aggressively the pool tilts toward winners.
+    - Every allocation respects min_budget_eur (Meta learning-phase floor).
+    - Allocations always sum to total_budget_eur.
+
+    Returns list of dicts with current vs proposed budget and whether the
+    change is big enough to be worth applying (min_change_pct).
+    """
+    if not matches:
+        return []
+
+    n = len(matches)
+
+    # Each creative's current equal share (baseline for "change" comparison)
+    current_share = round(total_budget_eur / n, 2)
+
+    # Compute raw weights
+    weights = []
+    for m in matches:
+        sim = m["similarity"]
+        if sim >= threshold:
+            # strength above threshold, 0..1
+            strength = (sim - threshold) / (1.0 - threshold)
+            # demand tilts the curve: higher demand = sharper preference for winners
+            weight = (0.1 + strength) ** (1.0 + (demand_index - 1.0))
+        else:
+            # below threshold: tiny weight, will land near the floor
+            weight = 0.01
+        weights.append(weight)
+
+    total_weight = sum(weights)
+
+    # First pass: proportional allocation
+    raw_allocations = [total_budget_eur * (w / total_weight) for w in weights]
+
+    # Enforce minimum floor, then redistribute the remainder proportionally
+    allocations = [max(a, min_budget_eur) for a in raw_allocations]
+    floor_total = sum(allocations)
+
+    # If flooring pushed us over budget, scale the above-floor portion back down
+    if floor_total > total_budget_eur:
+        # scale only the parts above the floor
+        excess = floor_total - total_budget_eur
+        above_floor = [a - min_budget_eur for a in allocations]
+        above_total = sum(above_floor) or 1
+        allocations = [
+            round(min_budget_eur + af - excess * (af / above_total), 2)
+            for af in above_floor
+        ]
+    else:
+        # distribute leftover proportionally by weight
+        leftover = total_budget_eur - floor_total
+        allocations = [
+            round(a + leftover * (w / total_weight), 2)
+            for a, w in zip(allocations, weights)
+        ]
+
+    results = []
+    for m, proposed in zip(matches, allocations):
+        change_pct = abs(proposed - current_share) / current_share if current_share else 0
+        results.append({
+            "creative_id": m["creative_id"],
+            "headline": m.get("headline"),
+            "similarity": m["similarity"],
+            "current_budget_eur": current_share,
+            "proposed_budget_eur": proposed,
+            "change_pct": round(change_pct * 100, 1),
+            "apply": change_pct >= min_change_pct,  # skip tiny changes (learning phase)
+            "share_pct": round(proposed / total_budget_eur * 100, 1)
+        })
+
+    # Sort biggest allocation first
+    results.sort(key=lambda x: x["proposed_budget_eur"], reverse=True)
+    return results

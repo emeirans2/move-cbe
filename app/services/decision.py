@@ -61,8 +61,13 @@ def make_recommendation(
             "creative_id": match["creative_id"]
         }
     
-    # Calculate budget delta
-    delta = min(BASE_STEP * demand_index, MAX_STEP)
+    # Calculate budget delta — scales with BOTH match strength and demand
+    # match_strength: how far above threshold (0 at threshold, 1 at perfect match)
+    match_strength = (similarity - SIMILARITY_THRESHOLD) / (1.0 - SIMILARITY_THRESHOLD)
+    match_strength = max(0.0, min(1.0, match_strength))
+    # base step is modulated by match strength (0.5x to 1.5x) and demand
+    match_multiplier = 0.5 + match_strength  # ranges 0.5–1.5
+    delta = min(BASE_STEP * match_multiplier * demand_index, MAX_STEP)
     proposed = round(current_budget_eur * (1 + delta), 2)
     
     # Check guardrails
@@ -102,7 +107,7 @@ def make_recommendation(
         # Audit log
         db.execute(text("""
             INSERT INTO audit_log (event_type, entity_type, entity_id, context)
-            VALUES ('recommendation_created', 'creative', :creative_id, :context::jsonb)
+            VALUES ('recommendation_created', 'creative', :creative_id, CAST(:context AS jsonb))
         """), {
             "creative_id": match["creative_id"],
             "context": f'{{"similarity": {similarity}, "demand_index": {demand_index}, "delta_pct": {round(delta*100,1)}, "status": "{status}"}}'

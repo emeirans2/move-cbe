@@ -308,3 +308,53 @@ def auto_score_mood(client_id: int = 1):
         "recommendations_generated": len(all_recommendations),
         "brief_preview": brief[:300]
     }
+
+
+class AllocateRequest(BaseModel):
+    client_id: int
+    total_budget_eur: float = 100.0
+    date: Optional[str] = None
+
+@router.post("/allocate")
+def allocate_budget(data: AllocateRequest):
+    """Distribute a fixed budget pool across a client's creatives by today's mood match."""
+    from app.services.matcher import allocate_budget_pool
+    from datetime import date as date_cls
+
+    today = data.date or str(date_cls.today())
+
+    db = SessionLocal()
+    try:
+        context = db.execute(text("""
+            SELECT mood_vector::text, demand_index
+            FROM daily_context
+            WHERE date = :date AND geo = 'LV'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"date": today}).fetchone()
+        if not context:
+            raise HTTPException(status_code=404, detail="No mood scored for today. Run the daily loop first.")
+        vec_str = context.mood_vector.strip('[]')
+        mood_vector = [float(x) for x in vec_str.split(',')]
+        demand_index = context.demand_index
+    finally:
+        db.close()
+
+    matches = get_matches_for_client(data.client_id, mood_vector, today)
+    if not matches:
+        return {"message": "No scored creatives", "allocations": []}
+
+    allocations = allocate_budget_pool(
+        matches=matches,
+        total_budget_eur=data.total_budget_eur,
+        demand_index=demand_index
+    )
+
+    return {
+        "date": today,
+        "client_id": data.client_id,
+        "total_budget_eur": data.total_budget_eur,
+        "demand_index": demand_index,
+        "mood_vector": mood_vector,
+        "allocations": allocations,
+        "total_allocated": round(sum(a["proposed_budget_eur"] for a in allocations), 2)
+    }

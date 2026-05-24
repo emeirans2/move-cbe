@@ -244,3 +244,67 @@ def get_audit(limit: int = 50):
                  "context": r.context} for r in rows]
     finally:
         db.close()
+
+@router.post("/mood/auto")
+def auto_score_mood(client_id: int = 1):
+    """Fetch all sources, build brief, score mood, run matches. Full daily loop."""
+    from app.ingestion.fusion import build_daily_brief
+    from datetime import date
+
+    today = str(date.today())
+
+    # Build brief from real sources
+    briefdata = build_daily_brief()
+    brief = briefdata["brief"]
+    demand_inputs = briefdata["demand_inputs"]
+
+    # Score mood
+    scores = score_text(brief)
+    vector = scores_to_vector(scores)
+    vector_str = "[" + ",".join(str(v) for v in vector) + "]"
+    demand = compute_demand_index(**demand_inputs)
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO daily_context (date, geo, brief, mood_vector, demand_index, raw)
+            VALUES (:date, 'LV', :brief, :vector, :demand, CAST(:raw AS jsonb))
+            ON CONFLICT DO NOTHING
+        """), {
+            "date": today,
+            "brief": brief,
+            "vector": vector_str,
+            "demand": demand,
+            "raw": json.dumps(scores)
+        })
+        db.commit()
+    finally:
+        db.close()
+
+    # Run matches for all clients
+    clients_resp = SessionLocal()
+    try:
+        result = clients_resp.execute(text("SELECT id FROM clients"))
+        client_ids = [r.id for r in result.fetchall()]
+    finally:
+        clients_resp.close()
+
+    all_recommendations = []
+    for cid in client_ids:
+        matches = get_matches_for_client(cid, vector, today)
+        for match in matches:
+            rec = make_recommendation(
+                match=match, client_id=cid, demand_index=demand,
+                current_budget_eur=50.0, date=today, mood_vector=vector
+            )
+            all_recommendations.append(rec)
+
+    return {
+        "date": today,
+        "mood_vector": vector,
+        "demand_index": demand,
+        "scores": scores,
+        "sources": briefdata["sources"],
+        "recommendations_generated": len(all_recommendations),
+        "brief_preview": brief[:300]
+    }

@@ -93,5 +93,16 @@ def init_db():
                 context JSONB
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_budget (
+                id SERIAL PRIMARY KEY,
+                client_id INTEGER REFERENCES clients(id),
+                date DATE NOT NULL,
+                budget_eur FLOAT NOT NULL,
+                source VARCHAR(50) DEFAULT 'manual',
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(client_id, date)
+            )
+        """))
         conn.commit()
     print("DB initialised successfully")

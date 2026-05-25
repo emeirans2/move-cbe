@@ -102,3 +102,50 @@ def scores_to_vector(scores: dict) -> list:
     """Convert score dict to ordered list for pgvector storage."""
     axes = ["joy","trust","anticipation","surprise","fear","urgency","nostalgia","aspiration","belonging","sadness"]
     return [scores[axis] for axis in axes]
+
+
+def score_image(image_base64: str, media_type: str, caption_text: str = "") -> dict:
+    """
+    Score an ad creative from its IMAGE using Claude Vision.
+    Analyzes visual emotional content + any provided caption/copy.
+    """
+    content = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": image_base64
+            }
+        },
+        {
+            "type": "text",
+            "text": f"""You are an expert in emotional analysis of advertising.
+
+Analyze this ad creative IMAGE and score its emotional content on 10 axes using the score_emotions tool.
+Consider the visual elements: colors, composition, facial expressions, setting, mood, lighting, and any text in the image.
+
+{f'Caption/copy accompanying the ad: {caption_text}' if caption_text else ''}
+
+AXIS DEFINITIONS:
+{AXIS_DEFINITIONS}
+
+CALIBRATION EXAMPLES:
+{FEW_SHOT_EXAMPLES}
+
+Use the score_emotions tool to return scores based on what you SEE in the image."""
+        }
+    ]
+
+    message = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        temperature=0,
+        tools=[SCORING_TOOL],
+        tool_choice={"type": "tool", "name": "score_emotions"},
+        messages=[{"role": "user", "content": content}]
+    )
+    for block in message.content:
+        if block.type == "tool_use" and block.name == "score_emotions":
+            return block.input
+    raise ValueError("No tool use block returned from Claude")

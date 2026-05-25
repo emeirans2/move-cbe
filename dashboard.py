@@ -76,6 +76,13 @@ with tab1:
                 st.write("")
 
             st.info("💡 Allocations are proportional to how well each creative matches today's cultural mood. The split is budget-agnostic — change the budget above and amounts rescale while percentages hold.")
+            # --- Why this allocation? ---
+            with st.expander("🧠 Why this allocation?", expanded=True):
+                exp_resp = httpx.post(f"{BASE}/allocate/explain", json={"client_id": selected_id}, timeout=30)
+                if exp_resp.status_code == 200:
+                    st.write(exp_resp.json().get("explanation", ""))
+                else:
+                    st.caption("Explanation unavailable.")
         else:
             st.info("No allocation yet — add creatives and run the daily loop.")
     else:
@@ -115,10 +122,11 @@ with tab1:
         
 # ============ TAB 2: CREATIVES ============
 with tab2:
+    if "upload_counter" not in st.session_state:
+        st.session_state.upload_counter = 0
     st.subheader(f"Creatives for {client_names[selected_id]}")
     creatives_resp = httpx.get(f"{BASE}/creatives/{selected_id}")
     creatives = creatives_resp.json()
-
     if not creatives:
         st.info("No creatives yet.")
     else:
@@ -126,9 +134,40 @@ with tab2:
             st.markdown(f"**{c['headline'] or 'No headline'}** — `{c['status']}`")
             st.caption(c["primary_text"])
             st.divider()
-
+    st.subheader("📤 Upload Ad Image")
+    uploaded = st.file_uploader(
+        "Upload an ad creative (PNG/JPG)",
+        type=["png", "jpg", "jpeg"],
+        key=f"img_uploader_{st.session_state.upload_counter}",
+    )
+    if uploaded:
+        st.image(uploaded, width=300)
+        up_headline = st.text_input("Headline (optional)", key=f"img_headline_{st.session_state.upload_counter}")
+        up_text = st.text_area("Caption/copy (optional)", key=f"img_text_{st.session_state.upload_counter}")
+        if st.button("🔍 Analyze & Add"):
+            import base64
+            img_bytes = uploaded.getvalue()
+            img_b64 = base64.b64encode(img_bytes).decode()
+            media = f"image/{uploaded.type.split('/')[-1]}"
+            with st.spinner("Claude Vision analyzing the image..."):
+                resp = httpx.post(f"{BASE}/creatives/image", json={
+                    "client_id": selected_id,
+                    "headline": up_headline,
+                    "primary_text": up_text,
+                    "image_base64": img_b64,
+                    "media_type": media
+                }, timeout=90)
+            if resp.status_code == 200:
+                result = resp.json()
+                st.success("Image analyzed and added!")
+                st.json(result["scores"])
+                st.session_state.upload_counter += 1
+                st.rerun()
+            else:
+                st.error(f"Error: {resp.text}")
+    st.divider()
     st.subheader("Add Creative")
-    with st.form("add_creative"):
+    with st.form("add_creative", clear_on_submit=True):
         headline = st.text_input("Headline")
         primary_text = st.text_area("Primary text")
         visual_desc = st.text_input("Visual description (optional)")

@@ -425,3 +425,103 @@ def allocate_v2(data: AllocateRequest):
         "allocations": euro_allocations,
         "total_allocated": round(sum(a["proposed_budget_eur"] for a in euro_allocations), 2)
     }
+
+
+@router.post("/allocate/explain")
+def explain_allocation(data: AllocateRequest):
+    """Generate a short plain-language explanation of today's budget allocation."""
+    from app.services.allocator import allocate_percentages
+    from datetime import date as date_cls
+    import anthropic, os
+
+    today = data.date or str(date_cls.today())
+
+    db = SessionLocal()
+    try:
+        context = db.execute(text("""
+            SELECT mood_vector::text, demand_index, brief
+            FROM daily_context WHERE date = :date AND geo = 'LV'
+            ORDER BY created_at DESC LIMIT 1
+        """), {"date": today}).fetchone()
+        if not context:
+            return {"explanation": "No mood scored yet. Run the daily loop first."}
+        vec_str = context.mood_vector.strip('[]')
+        mood_vector = [float(x) for x in vec_str.split(',')]
+        demand_index = context.demand_index
+        brief = context.brief
+    finally:
+        db.close()
+
+    matches = get_matches_for_client(data.client_id, mood_vector, today)
+    if not matches:
+        return {"explanation": "No creatives to allocate."}
+
+    allocations = allocate_percentages(matches, demand_index)
+
+    # Build a compact summary for Claude
+    alloc_summary = "\n".join(
+        f"- '{a['headline']}': {a['share_pct']}% (match {round(a['similarity']*100)}%)"
+        for a in allocations
+    )
+
+    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    msg = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=250,
+        temperature=0.3,
+        messages=[{
+            "role": "user",
+            "content": f"""You are explaining a Meta ad budget allocation to a media buyer in plain, confident language.
+
+Today's cultural context (Latvia):
+{brief[:600]}
+
+Demand index today: {demand_index} (1.0 = normal)
+
+Budget split decided by the system:
+{alloc_summary}
+
+Write 2-3 short sentences explaining WHY the budget is split this way today. Connect the dominant news/mood to the winning creative. Be specific and concrete, no fluff. Write in English. Do not list percentages again — explain the reasoning."""
+        }]
+    )
+    explanation = msg.content[0].text.strip()
+    return {"explanation": explanation, "date": today}
+
+
+class CreativeImageCreate(BaseModel):
+    client_id: int
+    headline: Optional[str] = None
+    primary_text: Optional[str] = ""
+    image_base64: str
+    media_type: str  # e.g. "image/jpeg", "image/png"
+
+@router.post("/creatives/image")
+def add_creative_from_image(data: CreativeImageCreate):
+    """Add a creative by uploading its image. Claude Vision scores the visual."""
+    from app.services.scorer import score_image
+
+    caption = f"{data.headline or ''} {data.primary_text or ''}".strip()
+    scores = score_image(data.image_base64, data.media_type, caption)
+    vector = scores_to_vector(scores)
+    vector_str = "[" + ",".join(str(v) for v in vector) + "]"
+
+    db = SessionLocal()
+    try:
+        result = db.execute(text("""
+            INSERT INTO creatives
+            (client_id, primary_text, headline, visual_description, raw_scores, scored_at)
+            VALUES (:client_id, :primary_text, :headline, 'image_upload', CAST(:raw AS jsonb), NOW())
+            RETURNING id
+        """), {
+            "client_id": data.client_id,
+            "primary_text": data.primary_text or "",
+            "headline": data.headline,
+            "raw": json.dumps(scores)
+        })
+        creative_id = result.fetchone().id
+        db.execute(text("UPDATE creatives SET vector = CAST(:vec AS vector) WHERE id = :id"),
+                   {"vec": vector_str, "id": creative_id})
+        db.commit()
+        return {"id": creative_id, "scores": scores, "vector": vector}
+    finally:
+        db.close()
